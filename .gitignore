@@ -1,3 +1,13 @@
+# Package folders
+bin/
+include/
+build/
+lib/
+models/
+Makefile
+models.txt
+
+
 # Compiled Object files
 *.slo
 *.lo

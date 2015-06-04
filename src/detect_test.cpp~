@@ -1,0 +1,106 @@
+#include <ros/ros.h>
+#include <pcl_ros/point_cloud.h>
+#include <pcl/point_types.h>
+#include <pcl/visualization/pcl_visualizer.h>
+#include <pcl/visualization/cloud_viewer.h>
+
+#include "../Linemod/OnlineGrabber.h"
+
+using namespace std;
+using namespace pcl;
+
+LinemodWrap lmw;
+visualization::PCLVisualizer viewer("Detection");
+vector<double> detection_score;
+int counter = 0;
+int max_iter = 1000;
+float mean_detection_time = 0.0;
+
+void cloud_cb(const PointCloudType::ConstPtr& msg) {
+	if (!viewer.updatePointCloud (msg, "single_cloud"))
+		viewer.addPointCloud (msg, "single_cloud");
+
+    vector<PointXYZ> min, max;
+    detection_score = lmw.detect(msg, min, max);
+
+    // Show result
+    for (size_t n = 0; n < detection_score.size(); ++n ) {
+        cout << "Object " << n << " : " << detection_score[n] << endl;
+        stringstream id;
+        id << n;
+        viewer.removeShape (id.str(), 0);
+        cout << min[n] << endl;
+        //cout << max[n] << endl;
+        viewer.addCube (min[n].x, max[n].x, min[n].y, max[n].y, min[n].z, max[n].z,
+                        1.0, 1.0, 1.0, id.str());
+    }
+    cout << endl;
+}
+
+// rosrun linemod_ros detect_test /camera/depth_registered/points file_with_models_paths
+int main(int argc, char** argv) {
+    assert(argc == 3 && "Usage: train_test cloud_in model_in");
+
+	ros::init(argc, argv, "linemod_online_train");
+	ros::NodeHandle n;
+	ros::Subscriber sub_clouds = n.subscribe(argv[1], 1, cloud_cb);
+
+	viewer.setBackgroundColor (0, 0, 0);
+	viewer.initCameraParameters ();
+
+    int num_objects = lmw.load(argv[2]);
+    cout << "Loaded " << num_objects << " objects." << endl;
+	ros::Rate loop_rate(10);
+	while (ros::ok() && !viewer.wasStopped()) {
+	//while (ros::ok()) {
+	    viewer.spinOnce(1);
+		ros::spinOnce();
+		loop_rate.sleep ();
+	}
+
+	return 0;
+}
+
+/*
+// Time evaluation experiment
+void cloud_cb(const PointCloudType::ConstPtr& msg) {
+    vector<PointXYZ> min, max;
+    clock_t begin = clock();
+    detection_score = lmw.detect(msg, min, max);
+    clock_t end = clock();
+    double elapsed_secs = double(end - begin) / CLOCKS_PER_SEC;
+    mean_detection_time += elapsed_secs;
+    cout << "Detection time: " << elapsed_secs << "s." << endl;
+    ++counter;
+}
+
+// rosrun linemod_ros detect_test /camera/depth_registered/points models.txt
+int main(int argc, char** argv) {
+    assert(argc == 3 && "Usage: train_test cloud_in models_list");
+
+	ros::init(argc, argv, "linemod_online_train");
+	ros::NodeHandle n;
+	ros::Subscriber sub_clouds = n.subscribe(argv[1], 1, cloud_cb);
+
+    int num_objects = 0;
+    clock_t begin = clock();
+    num_objects = lmw.load(argv[2]);
+    clock_t end = clock();
+    double elapsed_secs = double(end - begin) / CLOCKS_PER_SEC;
+    cout << "Loading time: " << elapsed_secs << "s." << endl;
+
+    cout << "Loaded " << num_objects << " objects." << endl;
+
+	ros::Rate loop_rate(100);
+	while (ros::ok()) {
+		ros::spinOnce();
+		loop_rate.sleep ();
+		if (counter == max_iter)
+	        break;
+	}
+
+    cout << "Mean detection time: " << mean_detection_time/float(max_iter) << endl;
+
+	return 0;
+}
+*/

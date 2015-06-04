@@ -1,0 +1,280 @@
+#include "LinemodWrap.h"
+
+#include <pcl/recognition/linemod/line_rgbd.h>
+//#include <pcl/recognition/color_gradient_modality.h>
+//#include <pcl/recognition/surface_normal_modality.h>
+
+using namespace std;
+using namespace cv;
+using namespace pcl;
+using namespace pcl::io;
+
+// This must be declared here, beacause any reference to LineRGBD need to be avoided
+//  in the header.
+vector<int> bestDetection(std::vector<LineRGBD<PointType>::Detection> detections, int num_objects);
+// THIS is ugly, however due to a linker error, line_rgbd_ NEEDS to be declared
+// in this file.
+static pcl::LineRGBD<PointType> linemod_;
+
+LinemodWrap::LinemodWrap() {
+    linemod_.setGradientMagnitudeThreshold (10.0);
+    linemod_.setDetectionThreshold (0.95);
+    num_objects_ = 0;
+}
+
+void LinemodWrap::setGradientMagThresh (float grad_mag_thresh) {
+    linemod_.setGradientMagnitudeThreshold (grad_mag_thresh);
+}
+
+void LinemodWrap::setDetectionThresh (float detect_thresh) {
+    linemod_.setDetectionThreshold (detect_thresh);
+}
+
+bool LinemodWrap::loadCloud (const std::string & filename, PointCloudType & cloud) {
+    cout << "Loading " << filename.c_str () << endl;
+    if (loadPCDFile (filename, cloud) < 0)
+        return false;
+
+    cout << "Available dimensions: " << pcl::getFieldsList(cloud).c_str() << endl;
+    return true;
+}
+/*********************************************************************
+* Detect
+*********************************************************************/
+vector<double> LinemodWrap::detect(const PointCloudType::ConstPtr cloud,
+                                   vector<pcl::PointXYZ> &min, vector<pcl::PointXYZ> &max) {
+    min.clear();    max.clear();
+    // Detect objects
+    vector<double> response;
+    linemod_.setInputCloud (cloud);
+    linemod_.setInputColors (cloud);
+    
+    std::vector<LineRGBD<PointType>::Detection> detections;
+    linemod_.detectSemiScaleInvariant (detections);
+    //linemod_.detect (detections);
+    //cout << "Responses : " << detections.size() << endl;
+    //for (size_t i = 0; i < detections.size(); ++i)
+        //cout << detections[i].response << endl;
+
+    if (detections.size() == 0) {
+        min.push_back(PointXYZ(0, 0, 0));
+        max.push_back(PointXYZ(0, 0, 0));
+        response.push_back(0.0);
+        return response;
+    }
+    
+    vector<int> best_ids = bestDetection(detections, num_objects_);
+    
+    size_t l = best_ids.size();
+    min.resize(l);
+    max.resize(l);
+    response.resize(l);
+    for (size_t n = 0; n < l; ++n) {
+        if (best_ids[n] != -1) {
+            const LineRGBD<PointType>::Detection & d = detections[best_ids[n]];
+            const BoundingBoxXYZ & bb = d.bounding_box;
+            min[n] = PointXYZ(bb.x, bb.y, bb.z);
+            max[n] = PointXYZ(bb.x + bb.width, bb.y + bb.height, bb.z + bb.depth);
+            response[n] = d.response;
+        } else {
+            min[n] = PointXYZ(0, 0, 0);
+            max[n] = PointXYZ(0, 0, 0);
+            response[n] = 0.0;
+        }
+    }
+
+    return response;
+}
+/*********************************************************************
+* Train
+*********************************************************************/
+// TODO
+//  voir si i et j sont pris dans le bon ordre à chaque fois
+void LinemodWrap::trainTemplateVirtual (const PointCloudType::ConstPtr &input, cv::Mat foreground_mask) {
+    PointCloudType::Ptr object_cloud (new PointCloudType());
+    pcl::MaskMap mask_map (foreground_mask.cols, foreground_mask.rows);
+    cout << "Input has width " << input->width << " and height " << input->height << endl;
+    cout << "Mask has width " << foreground_mask.cols << " and height " << foreground_mask.rows << endl;
+    
+    int min_x (input->width), min_y (input->height), max_x (0), max_y (0);
+    for (int i = 0; i < foreground_mask.rows; ++i) {
+        for (int j = 0; j < foreground_mask.cols; ++j) {
+            if (foreground_mask.at<uchar>(j,i) == 255) {
+                object_cloud->points.push_back(input->points[i*foreground_mask.cols+j]);
+                mask_map (j,i) = true;
+                min_x = std::min (min_x, j);
+                max_x = std::max (max_x, j);
+                min_y = std::min (min_y, i);
+                max_y = std::max (max_y, i);
+            } else {
+                mask_map (j,i) = false;
+            }
+        }
+    }
+
+    object_cloud->width = object_cloud->points.size();
+    object_cloud->height = 1;
+
+    std::vector<pcl::MaskMap> masks (2);
+    masks[0] = mask_map;
+    masks[1] = mask_map;
+
+    pcl::RegionXY region;
+    region.x = static_cast<int> (min_x);
+    region.y = static_cast<int> (min_y);
+    region.width = static_cast<int> (max_x - min_x + 1);
+    region.height = static_cast<int> (max_y - min_y + 1);
+
+    int object_id = 0;
+        
+    cout << "Copied input of size " << input->points.size() << endl;
+    cout << "Object has " << object_cloud->points.size() << " points." << endl;
+    cout << "Using masks with width " << masks[0].getWidth() << " and height " << masks[0].getHeight() << endl;
+    cout << "Using region " << region.x << " " << region.y << " " << region.width << " " << region.height << endl;
+    
+    if (!input->isOrganized())
+        cout << "Warning: trainTemplate: input cloud not organized." << endl;
+    linemod_.setInputCloud(input);
+    linemod_.setInputColors(input);
+    linemod_.createAndAddTemplate(*object_cloud, object_id, masks[0], masks[1], region);
+}
+
+void LinemodWrap::trainTemplateOnline (const PointCloudType::ConstPtr &input, const std::vector<bool> &foreground_mask) {
+    PointCloudType::Ptr object_cloud (new PointCloudType());
+    pcl::MaskMap mask_map (input->width, input->height);
+    //cout << "Cloud dims " << input->width << " " << input->height << endl;
+    size_t min_x (input->width), min_y (input->height), max_x (0), max_y (0);
+    
+    for (size_t j = 0; j < input->height; ++j) {
+        for (size_t i = 0; i < input->width; ++i) {
+            int index = j * input->width + i;
+            mask_map (i,j) = foreground_mask[index];
+            if (foreground_mask[index]) {
+                object_cloud->points.push_back(input->points[index]);
+                min_x = std::min (min_x, i);
+                max_x = std::max (max_x, i);
+                min_y = std::min (min_y, j);
+                max_y = std::max (max_y, j);
+            }
+        }
+    }
+    
+    object_cloud->width = object_cloud->points.size();
+    object_cloud->height = 1;
+
+    std::vector<pcl::MaskMap> masks (2);
+    masks[0] = mask_map;
+    masks[1] = mask_map;
+
+    pcl::RegionXY region;
+    region.x = static_cast<int> (min_x);
+    region.y = static_cast<int> (min_y);
+    region.width = static_cast<int> (max_x - min_x + 1);
+    region.height = static_cast<int> (max_y - min_y + 1);
+
+    int object_id = 0;
+    /*
+    cout << "Copied input of size " << input->points.size() << endl;
+    cout << "Using masks with width " << masks[0].getWidth() << " " << masks[1].getWidth() << endl;
+    cout << "Using masks with width " << masks[0].getHeight() << " " << masks[1].getHeight() << endl;
+    cout << "Using region " << << region.x << " " << region.y << " " << region.width << " " << region.height << endl;
+    */
+    if (!input->isOrganized())
+        cout << "Warning: trainTemplate: input cloud not organized." << endl;
+    linemod_.setInputCloud(input);
+    linemod_.setInputColors(input);
+    linemod_.createAndAddTemplate(*object_cloud, object_id, masks[0], masks[1], region);
+}
+
+// Save the input pointcloud and corresponding last template to pcd and sqmmt files
+void LinemodWrap::saveLastTemplate (PointCloudType template_cloud, string pcd, string sqmmt) {
+    pcl::io::savePCDFile (pcd, template_cloud);
+    // Save last template
+    std::ofstream file_stream;
+    file_stream.open (sqmmt.c_str (), std::ofstream::out | std::ofstream::binary);
+    int num_templates = linemod_.linemod_.getNumOfTemplates();
+    linemod_.linemod_.getTemplate(num_templates - 1).serialize (file_stream);
+    file_stream.close ();
+}
+
+void LinemodWrap::saveTemplates (vector<string> filepaths) {
+    for (size_t i=0; i < filepaths.size(); ++i) {
+        std::ofstream file_stream;
+        string filepath = filepaths[i] + "_cloud.sqmmt";
+        file_stream.open (filepath.c_str(), std::ofstream::out | std::ofstream::binary);
+        //int num_templates = linemod_.linemod_.getNumOfTemplates();
+        //linemod_.linemod_.getTemplate(num_templates - 1).serialize (file_stream);
+        //cout << "Number of features : " << linemod_.linemod_.getTemplate(i).features.size() << endl;
+        linemod_.linemod_.getTemplate(i).serialize (file_stream);
+        file_stream.close ();
+    }
+}
+
+void LinemodWrap::save (string lmt_output) {
+    cout << "Saving " << linemod_.linemod_.getNumOfTemplates() << " templates." << endl;
+    // This functions only save templates. PCD files are not saved, so the resulting
+    // file cannot be loaded as a model directly. So it is commented.
+    //linemod_.linemod_.saveTemplates(lmt_filepath.c_str());
+    string command = "tar -cvf " + lmt_output + " *.pcd *.sqmmt";
+    system(command.c_str());
+}
+
+int LinemodWrap::load(std::string list_path) {
+    string line;
+    ifstream file(list_path.c_str());
+    if (file.is_open()) {
+        while( getline(file, line)) {
+            loadModel(line, num_objects_);
+        }
+        file.close();
+    } else {
+        cout << "Could not open " << list_path << "." << endl;
+    }
+
+    return num_objects_;
+}
+
+bool LinemodWrap::loadModel (std::string lmt_filepath, int object_id) {
+    cout << "Loading " << lmt_filepath << "..."; 
+    bool res = linemod_.loadTemplates (lmt_filepath.c_str(), object_id);
+    cout << "loaded with " << linemod_.linemod_.getNumOfTemplates() << " templates." << endl;
+    ++num_objects_;
+    return res;
+}
+
+void LinemodWrap::setNumObjects(int num_objects) {
+    num_objects_ = num_objects;
+}
+
+vector<int> bestDetection(std::vector<LineRGBD<PointType>::Detection> detections, int num_objects) {
+    cout << "Detections size: " << detections.size() << endl;
+    
+    //cout << num_objects << endl;
+    vector<double> best_response(num_objects);
+    fill(best_response.begin(), best_response.end(), 0);
+    vector<int> best_id(num_objects);
+    fill(best_id.begin(), best_id.end(), -1);
+    
+    for (size_t i = 0; i < detections.size(); ++i) {
+        int n = detections[i].object_id;
+        if(detections[i].response > best_response[n]) {
+            best_id[n] = i;
+            best_response[n] = detections[i].response;
+        }
+    }
+    /*
+    for (int n = 0; n < num_objects; ++n) {
+        for (size_t i = 0; i < detections.size(); ++i) {
+            if (detections[i].object_id == n) {
+                if(detections[i].response > best_response[n]) {
+                    best_id[n] = i;
+                    best_response[n] = detections[i].response;
+                }
+            }
+        }
+    }
+    */
+    
+    return best_id;
+}
+
