@@ -1,0 +1,36 @@
+<!-- -->
+<launch>
+    <include file="$(find openni2_launch)/launch/openni2.launch">
+        <arg name="depth_registration" value="false" />
+    </include>
+
+    <!-- Remove NANs and filter distance, all reconfigurable with dynamic reconfigure -->
+    <node pkg="nodelet" type="nodelet" name="pcl_manager" args="manager" output="screen"/>
+    <node pkg="nodelet" type="nodelet" name="passx" args="load pcl/PassThrough pcl_manager">
+        <remap from="~input" to="/camera/depth_registered/points" />
+        <rosparam>
+            filter_field_name: x
+            filter_limit_min: -0.35
+            filter_limit_max: 0.35
+            keep_organized: true
+        </rosparam>
+    </node>
+    <node pkg="nodelet" type="nodelet" name="passy" args="load pcl/PassThrough pcl_manager">
+        <remap from="~input" to="/passx/output" />
+        <rosparam>
+            filter_field_name: y
+            filter_limit_min: -0.30
+            filter_limit_max: 0.15
+            keep_organized: true
+        </rosparam>
+    </node>
+    <node pkg="nodelet" type="nodelet" name="passz" args="load pcl/PassThrough pcl_manager">
+        <remap from="~input" to="/passy/output" />
+        <rosparam>
+            filter_field_name: z
+            filter_limit_min: 0.0
+            filter_limit_max: 2.0
+            keep_organized: true
+        </rosparam>
+    </node>
+</launch>
