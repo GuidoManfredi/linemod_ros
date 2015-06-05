@@ -4,7 +4,6 @@ include/
 build/
 lib/
 models/
-Makefile
 models.txt
 
 
